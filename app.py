@@ -1,6 +1,6 @@
 """
-Real & Nominal Exchange Rate Explorer (IMF SDMX 3.0)
-====================================================
+RealFX — Real & Nominal Exchange Rate Analytics (IMF SDMX 3.0)
+==============================================================
 
 Downloads monthly CPI and exchange-rate data from the IMF SDMX 3.0 API and computes
 
@@ -23,6 +23,7 @@ Run with:  streamlit run app.py
 
 from __future__ import annotations
 
+import html
 import io
 import re
 import xml.etree.ElementTree as ET
@@ -37,6 +38,8 @@ from plotly.subplots import make_subplots
 # =============================================================================
 # Configuration
 # =============================================================================
+APP_NAME = "RealFX"
+
 IMF_BASE_URL = "https://api.imf.org/external/sdmx/3.0"
 AGENCY = "IMF.STA"            # IMF Statistics Department
 CPI_DATAFLOW = "CPI"
@@ -69,7 +72,7 @@ START_TS = pd.Timestamp("1976-01-01")
 REQUEST_TIMEOUT = (10, 45)    # (connect, read) seconds
 CACHE_TTL = 24 * 60 * 60      # 24 hours
 USER_AGENT = (
-    "RER-Explorer/1.2 (Streamlit Community Cloud; educational real-exchange-rate app; "
+    "RealFX/2.0 (Streamlit Community Cloud; educational real-exchange-rate app; "
     "python-requests)"
 )
 
@@ -78,8 +81,13 @@ ACCEPT_JSON = "application/vnd.sdmx.data+json;version=2.0.0"
 ACCEPT_STRUCT_JSON = "application/vnd.sdmx.structure+json;version=2.0.0"
 ACCEPT_STRUCT_XML = "application/vnd.sdmx.structure+xml;version=3.0.0"
 
-REAL_COLOR = "#2563EB"     # blue: Real Index
-NOMINAL_COLOR = "#F97316"  # orange: nominal S(t)
+# Design tokens
+REAL_COLOR = "#4F46E5"            # indigo: Real Index
+REAL_FILL = "rgba(79, 70, 229, 0.10)"
+NOMINAL_COLOR = "#F97316"         # orange: nominal S(t)
+INK = "#0F172A"
+MUTED = "#64748B"
+GRID = "#EDF1F7"
 
 FALLBACK_COUNTRIES: dict[str, tuple[str, str]] = {
     "USA": ("United States", "USD"),
@@ -125,69 +133,205 @@ FALLBACK_COUNTRIES: dict[str, tuple[str, str]] = {
 }
 CURRENCY_CODES = {iso: ccy for iso, (_, ccy) in FALLBACK_COUNTRIES.items()}
 
+# One-click pairs shown in the sidebar (Country 1, Country 2, label).
+QUICK_PAIRS = [
+    ("USA", "G163", "USD · EUR"),
+    ("USA", "GBR", "USD · GBP"),
+    ("USA", "JPN", "USD · JPY"),
+    ("USA", "CHN", "USD · CNY"),
+    ("USA", "CAN", "USD · CAD"),
+    ("USA", "MEX", "USD · MXN"),
+]
+
 
 def _empty_series() -> pd.Series:
     return pd.Series(dtype="float64")
 
 
 # =============================================================================
-# Styling
+# Styling & HTML helpers
 # =============================================================================
+def _html(s: str) -> str:
+    """Strip indentation and blank lines so Streamlit's Markdown renders raw HTML
+    instead of treating indented lines as a code block."""
+    return "\n".join(line.strip() for line in s.strip().splitlines() if line.strip())
+
+
+def render(s: str) -> None:
+    st.markdown(_html(s), unsafe_allow_html=True)
+
+
+def esc(s) -> str:
+    return html.escape(str(s))
+
+
+def md_to_html(text: str) -> str:
+    """Tiny Markdown subset (bold, inline code, line breaks) for styled notes."""
+    t = esc(text)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+    t = re.sub(r"`(.+?)`", r"<code>\1</code>", t)
+    return t.replace("\n", "<br>")
+
+
+CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, p, li, label, h1, h2, h3, h4, h5, .stMarkdown, button, input { font-family: 'Inter', sans-serif; }
+.stApp {
+background:
+radial-gradient(1100px 500px at 0% -10%, rgba(99, 102, 241, 0.10), transparent 60%),
+radial-gradient(900px 400px at 100% 0%, rgba(14, 165, 233, 0.08), transparent 60%),
+#F6F8FC;
+}
+header[data-testid="stHeader"] { background: transparent; }
+#MainMenu, footer { visibility: hidden; }
+.block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1320px; }
+/* ---------- Sidebar ---------- */
+section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0B1220 0%, #111A2E 100%); border-right: 1px solid #1E293B; }
+section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] small, section[data-testid="stSidebar"] summary { color: #CBD5E1; }
+section[data-testid="stSidebar"] [data-baseweb="select"] > div { background: #0F172A; border-color: #334155; border-radius: 10px; }
+section[data-testid="stSidebar"] [data-baseweb="select"] div, section[data-testid="stSidebar"] [data-baseweb="select"] span { color: #F1F5F9 !important; }
+section[data-testid="stSidebar"] [data-baseweb="select"] svg { fill: #94A3B8; }
+section[data-testid="stSidebar"] .stButton button {
+background: rgba(255, 255, 255, 0.04); border: 1px solid #334155; color: #E2E8F0;
+border-radius: 10px; font-weight: 600; font-size: 0.82rem; transition: all 0.15s ease;
+}
+section[data-testid="stSidebar"] .stButton button:hover { border-color: #6366F1; background: rgba(99, 102, 241, 0.15); color: #fff; }
+section[data-testid="stSidebar"] [data-testid="stExpander"] details { background: rgba(255, 255, 255, 0.03); border: 1px solid #1E293B; border-radius: 12px; }
+.sb-brand { display: flex; align-items: center; gap: 10px; margin: 4px 0 18px 0; }
+.sb-logo { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; font-weight: 800; color: #fff;
+background: linear-gradient(135deg, #6366F1, #0EA5E9); box-shadow: 0 6px 18px rgba(99, 102, 241, 0.45); }
+.sb-name { font-weight: 800; font-size: 1.15rem; color: #F8FAFC; letter-spacing: -0.01em; line-height: 1.1; }
+.sb-tag { font-size: 0.72rem; color: #94A3B8; }
+.sb-section { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #64748B; margin: 18px 0 6px 0; }
+/* ---------- Hero ---------- */
+.hero {
+position: relative; overflow: hidden; border-radius: 22px; padding: 28px 32px; margin-bottom: 22px; color: #fff;
+background:
+radial-gradient(800px 280px at 90% -30%, rgba(56, 189, 248, 0.35), transparent 60%),
+radial-gradient(700px 300px at -10% 130%, rgba(99, 102, 241, 0.55), transparent 60%),
+linear-gradient(135deg, #0B1220 0%, #1E1B4B 100%);
+box-shadow: 0 24px 48px -18px rgba(15, 23, 42, 0.45);
+display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap;
+}
+.hero::after {
+content: ""; position: absolute; inset: 0; pointer-events: none;
+background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+background-size: 34px 34px;
+-webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent 85%);
+mask-image: linear-gradient(to bottom, rgba(0,0,0,0.7), transparent 85%);
+}
+.hero > * { position: relative; z-index: 1; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; font-weight: 600; padding: 4px 10px;
+border-radius: 999px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); color: #E0E7FF; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: #22C55E; box-shadow: 0 0 0 0 rgba(34,197,94,0.6); animation: pulse 2s infinite; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.55); } 70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } }
+.hero-title { font-size: 2.3rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; margin: 0; color: #fff; }
+.hero-title .arrow { color: #818CF8; font-weight: 700; padding: 0 6px; }
+.hero-sub { color: rgba(226, 232, 240, 0.82); font-size: 0.98rem; margin-top: 8px; }
+.hero-stats { display: flex; gap: 12px; flex-wrap: wrap; }
+.hero-stat { min-width: 150px; padding: 12px 16px; border-radius: 14px; background: rgba(255,255,255,0.07);
+border: 1px solid rgba(255,255,255,0.14); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+.hero-stat .k { font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; color: #A5B4FC; font-weight: 700; }
+.hero-stat .v { font-size: 1.45rem; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.hero-stat .s { font-size: 0.74rem; color: #CBD5E1; }
+/* ---------- KPI cards ---------- */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 14px; margin: 6px 0 18px 0; }
+.kpi { background: #fff; border: 1px solid #E6EAF2; border-radius: 16px; padding: 16px 18px;
+box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -16px rgba(15,23,42,0.18); transition: transform 0.15s ease, box-shadow 0.15s ease; }
+.kpi:hover { transform: translateY(-2px); box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 14px 30px -16px rgba(79,70,229,0.35); }
+.kpi-top { display: flex; justify-content: space-between; align-items: center; }
+.kpi-label { font-size: 0.74rem; font-weight: 600; color: #64748B; letter-spacing: 0.02em; }
+.kpi-icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 0.9rem; background: #EEF2FF; }
+.kpi-value { font-size: 1.6rem; font-weight: 800; color: #0F172A; letter-spacing: -0.02em; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.kpi-sub { font-size: 0.76rem; margin-top: 4px; color: #64748B; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-weight: 700; font-size: 0.72rem; margin-right: 4px; }
+.pill.pos { background: #DCFCE7; color: #15803D; }
+.pill.neg { background: #FEE2E2; color: #B91C1C; }
+.pill.neu { background: #F1F5F9; color: #475569; }
+/* ---------- Cards ---------- */
+.card { background: #fff; border: 1px solid #E6EAF2; border-radius: 18px; padding: 20px 22px; height: 100%;
+box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -16px rgba(15,23,42,0.18); }
+.eyebrow { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: #6366F1; margin-bottom: 8px; }
+.insight-head { font-size: 1.22rem; font-weight: 700; color: #0F172A; letter-spacing: -0.01em; line-height: 1.35; }
+.insight-head .pos { color: #15803D; } .insight-head .neg { color: #B91C1C; }
+.insight-body { color: #475569; font-size: 0.92rem; margin-top: 8px; line-height: 1.55; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.chip { font-size: 0.76rem; font-weight: 600; color: #334155; background: #F1F5F9; border: 1px solid #E2E8F0; padding: 5px 10px; border-radius: 999px; }
+.dec-row { display: grid; grid-template-columns: 1fr 70px; gap: 6px 12px; align-items: center; margin-top: 12px; }
+.dec-label { font-size: 0.82rem; font-weight: 600; color: #334155; }
+.dec-val { font-size: 0.86rem; font-weight: 800; text-align: right; font-variant-numeric: tabular-nums; }
+.dec-val.pos { color: #15803D; } .dec-val.neg { color: #B91C1C; }
+.dec-track { grid-column: 1 / span 2; height: 8px; border-radius: 999px; background: #F1F5F9; overflow: hidden; }
+.dec-bar { height: 100%; border-radius: 999px; }
+.dec-bar.pos { background: linear-gradient(90deg, #4ADE80, #16A34A); }
+.dec-bar.neg { background: linear-gradient(90deg, #F87171, #DC2626); }
+.dec-note { font-size: 0.74rem; color: #94A3B8; margin-top: 14px; }
+/* ---------- Notes ---------- */
+.notes { display: flex; flex-direction: column; gap: 8px; margin: 2px 0 16px 0; }
+.note { font-size: 0.84rem; padding: 10px 14px; border-radius: 12px; border: 1px solid; line-height: 1.5; }
+.note.warn { background: #FFFBEB; border-color: #FDE68A; color: #92400E; }
+.note.info { background: #EEF2FF; border-color: #C7D2FE; color: #3730A3; }
+.note code { background: rgba(15,23,42,0.06); padding: 1px 5px; border-radius: 5px; font-size: 0.78rem; }
+/* ---------- Section header ---------- */
+.section-head { display: flex; justify-content: space-between; align-items: baseline; margin: 22px 0 8px 0; }
+.section-title { font-size: 1.05rem; font-weight: 700; color: #0F172A; }
+.section-meta { font-size: 0.8rem; color: #64748B; }
+/* ---------- Tabs ---------- */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; background: #E9EDF5; padding: 4px; border-radius: 12px; width: fit-content; }
+.stTabs [data-baseweb="tab"] { border-radius: 9px; padding: 6px 18px; height: auto; font-weight: 600; color: #475569; }
+.stTabs [aria-selected="true"] { background: #fff; color: #0F172A; box-shadow: 0 1px 3px rgba(15,23,42,0.12); }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display: none; }
+/* ---------- Segmented radio (chart mode) ---------- */
+[data-testid="stMain"] div[role="radiogroup"], section.main div[role="radiogroup"] {
+display: inline-flex; gap: 0; background: #E9EDF5; padding: 4px; border-radius: 10px; }
+[data-testid="stMain"] div[role="radiogroup"] label, section.main div[role="radiogroup"] label {
+padding: 5px 16px; border-radius: 8px; margin: 0 !important; cursor: pointer; }
+[data-testid="stMain"] div[role="radiogroup"] label:has(input:checked), section.main div[role="radiogroup"] label:has(input:checked) {
+background: #fff; box-shadow: 0 1px 3px rgba(15,23,42,0.12); }
+[data-testid="stMain"] div[role="radiogroup"] label > div:first-child, section.main div[role="radiogroup"] label > div:first-child { display: none; }
+[data-testid="stMain"] div[role="radiogroup"] p, section.main div[role="radiogroup"] p { font-weight: 600; font-size: 0.85rem; }
+/* ---------- Charts, tables, expanders, buttons ---------- */
+[data-testid="stPlotlyChart"] { background: #fff; border: 1px solid #E6EAF2; border-radius: 18px; padding: 10px 8px 4px 8px;
+box-shadow: 0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -16px rgba(15,23,42,0.18); }
+[data-testid="stDataFrame"] { border-radius: 14px; overflow: hidden; border: 1px solid #E6EAF2; }
+[data-testid="stMain"] [data-testid="stExpander"] details, section.main [data-testid="stExpander"] details {
+background: #fff; border: 1px solid #E6EAF2; border-radius: 14px; }
+.stDownloadButton button { border-radius: 12px; font-weight: 700; padding: 0.6rem 1.1rem; }
+/* ---------- Footer ---------- */
+.app-footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid #E2E8F0; display: flex; justify-content: space-between;
+flex-wrap: wrap; gap: 8px; font-size: 0.76rem; color: #94A3B8; }
+@media (max-width: 640px) { .hero { padding: 22px; } .hero-title { font-size: 1.7rem; } }
+</style>
+"""
+
+
 def apply_styling() -> None:
-    """Custom look: Inter font, banner header, card-style metrics, chart and expander panels."""
-    st.markdown(
-        """
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-        html, body, p, li, label, h1, h2, h3, h4, .stMarkdown { font-family: 'Inter', sans-serif; }
-        .block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1300px; }
+    render(CSS)
 
-        .hero {
-            background: linear-gradient(135deg, #1E3A8A 0%, #2563EB 55%, #0EA5E9 100%);
-            color: #fff; padding: 1.6rem 2rem; border-radius: 16px; margin-bottom: 1.5rem;
-            box-shadow: 0 10px 30px rgba(37, 99, 235, 0.18);
-        }
-        .hero h1 { color: #fff; font-size: 2rem; font-weight: 700; margin: 0.2rem 0 0.3rem 0; padding: 0; }
-        .hero p { color: rgba(255, 255, 255, 0.88); margin: 0; font-size: 1rem; }
-        .hero-kicker {
-            text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem;
-            font-weight: 600; color: rgba(255, 255, 255, 0.75);
-        }
 
-        [data-testid="stMetric"] {
-            background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 12px;
-            padding: 0.9rem 1rem; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-        }
-        [data-testid="stMetricLabel"] p { font-size: 0.78rem; color: #64748B; font-weight: 500; }
-        [data-testid="stMetricValue"] { font-size: 1.35rem; font-weight: 700; color: #0F172A; }
-
-        [data-testid="stSidebar"] { border-right: 1px solid #E2E8F0; }
-        [data-testid="stPlotlyChart"] {
-            background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 14px; padding: 0.5rem;
-        }
-        [data-testid="stExpander"] details {
-            background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 12px;
-        }
-        .stDownloadButton button { border-radius: 10px; font-weight: 600; }
-        #MainMenu, footer { visibility: hidden; }
-        </style>
-        """,
-        unsafe_allow_html=True,
+def hero_html(ccy1: str, ccy2: str, name1: str, name2: str, stats: list[tuple[str, str, str]] | None = None) -> str:
+    """Dark banner with the currency pair and (once computed) headline stats."""
+    stat_html = "".join(
+        f'<div class="hero-stat"><div class="k">{esc(k)}</div><div class="v">{esc(v)}</div><div class="s">{esc(s)}</div></div>'
+        for k, v, s in (stats or [])
     )
-
-
-def hero() -> None:
-    """Banner header at the top of the page."""
-    st.markdown(
-        """
-        <div class="hero">
-            <div class="hero-kicker">IMF · SDMX 3.0 · Monthly data since 1976</div>
-            <h1>Real &amp; Nominal Exchange Rates</h1>
-            <p>Compare any two currencies in nominal terms and after adjusting for inflation.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    return f"""
+    <div class="hero">
+    <div>
+    <div class="badges">
+    <span class="badge"><span class="dot"></span>Live IMF data</span>
+    <span class="badge">Monthly · since 1976</span>
+    <span class="badge">Cached 24h</span>
+    </div>
+    <h1 class="hero-title">{esc(ccy1)}<span class="arrow">→</span>{esc(ccy2)}</h1>
+    <div class="hero-sub">{esc(name1)} vs {esc(name2)} · real &amp; nominal exchange rates</div>
+    </div>
+    <div class="hero-stats">{stat_html}</div>
+    </div>
+    """
 
 
 # =============================================================================
@@ -342,7 +486,7 @@ def _parse_sdmx_xml(text: str) -> pd.Series:
 
 
 def _parse_response(resp: requests.Response) -> pd.Series:
-    text = resp.text.lstrip("\ufeff").lstrip()
+    text = resp.text.lstrip("﻿").lstrip()
     if text.startswith("{"):
         return _parse_sdmx_json(resp.json())
     if text.startswith("<"):
@@ -420,7 +564,7 @@ def _fetch_country_codelist() -> dict[str, str]:
             if resp.status_code >= 400:
                 last_error = f"HTTP {resp.status_code} at {url}"
                 continue
-            text = resp.text.lstrip("\ufeff").lstrip()
+            text = resp.text.lstrip("﻿").lstrip()
             codes: dict[str, str] = {}
             try:
                 if text.startswith("{"):
@@ -464,9 +608,9 @@ def get_country_list() -> tuple[dict[str, str], str]:
             if re.fullmatch(r"[A-Z]{3}", cid) and cid not in countries:
                 countries[cid] = name
         countries["G163"] = "Euro area"
-        return countries, f"IMF codelist CL_COUNTRY ({len(countries)} entries)"
-    except Exception as exc:  # noqa: BLE001
-        return countries, f"built-in list of {len(countries)} major economies (IMF codelist unavailable: {exc})"
+        return countries, f"IMF codelist · {len(countries)} economies"
+    except Exception:  # noqa: BLE001
+        return countries, f"Built-in list · {len(countries)} major economies"
 
 
 def us_dollar_rate_series() -> pd.Series:
@@ -579,8 +723,8 @@ def build_dataframe(iso1: str, iso2: str, names: dict[str, str],
                                       f"\n\nURLs tried:\n{tried}"))
         elif res["source"] == "Eurostat":
             messages.append(("info", f"{name}: the IMF has no series under `{CPI_KEY_TEMPLATE.format(iso3=iso)}`, "
-                                     "so P is Eurostat's euro-area HICP (all items, monthly index). The index base "
-                                     "doesn't matter because the Real Index is normalised to its own mean."))
+                                     "so prices come from Eurostat's euro-area HICP (all items, monthly index). "
+                                     "The index base doesn't matter because the Real Index is normalised to its own mean."))
         sources.append((f"P{slot}: {name} price index ({res['key']})", res["url"]))
 
     order = ["E1_LCU_per_USD", "E2_LCU_per_USD", "P1", "P2"]
@@ -627,6 +771,23 @@ def compute_rer(df: pd.DataFrame, start: pd.Timestamp | None = None,
     return w, rer_star
 
 
+def pct_change(new: float, old: float) -> float:
+    """Percentage change from old to new; NaN if either is missing or old is zero."""
+    try:
+        if np.isfinite(new) and np.isfinite(old) and old != 0:
+            return (new / old - 1.0) * 100.0
+    except TypeError:
+        pass
+    return float("nan")
+
+
+def value_at(w: pd.DataFrame, col: str, ts: pd.Timestamp) -> float:
+    if ts in w.index:
+        v = w.at[ts, col]
+        return float(v) if pd.notna(v) else float("nan")
+    return float("nan")
+
+
 # =============================================================================
 # Charts
 # =============================================================================
@@ -634,69 +795,105 @@ def make_chart(w: pd.DataFrame, mode: str, ccy1: str, ccy2: str) -> go.Figure:
     """Plotly chart. mode in {"Real", "Nominal", "Both"}. S(t) is never normalised."""
     x = w.index
     nominal_axis = f"{ccy2} per 1 {ccy1}"
-    real_trace = go.Scatter(
-        x=x, y=w["Real_Index"], mode="lines", name="Real Index (mean = 100)",
-        line=dict(color=REAL_COLOR, width=2.5), connectgaps=False,
-        hovertemplate="Real Index: %{y:.2f}<extra></extra>",
-    )
-    nominal_trace = go.Scatter(
-        x=x, y=w["S"], mode="lines", name=f"Nominal S(t): {nominal_axis}",
-        line=dict(color=NOMINAL_COLOR, width=2.5), connectgaps=False,
-        hovertemplate="S(t): %{y:,.4f}<extra></extra>",
-    )
+    both = mode == "Both"
+    fig = make_subplots(specs=[[{"secondary_y": True}]]) if both else go.Figure()
 
-    if mode == "Both":
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(real_trace, secondary_y=False)
-        fig.add_trace(nominal_trace, secondary_y=True)
-        fig.update_yaxes(title_text="Real Index (mean over window = 100)", color=REAL_COLOR, secondary_y=False)
-        fig.update_yaxes(title_text=nominal_axis, color=NOMINAL_COLOR, secondary_y=True, showgrid=False)
-    elif mode == "Real":
-        fig = go.Figure(real_trace)
-        fig.update_yaxes(title_text="Real Index (mean over window = 100)")
-    else:
-        fig = go.Figure(nominal_trace)
-        fig.update_yaxes(title_text=nominal_axis)
+    def add(trace, secondary: bool = False):
+        if both:
+            fig.add_trace(trace, secondary_y=secondary)
+        else:
+            fig.add_trace(trace)
 
     if mode in ("Real", "Both"):
-        # Reference line at 100 on the (left) Real Index axis.
+        ri = w["Real_Index"]
+        # Invisible baseline at 100 so the Real Index can be shaded against it.
+        add(go.Scatter(x=x, y=np.full(len(x), 100.0), mode="lines", line=dict(width=0),
+                       hoverinfo="skip", showlegend=False))
+        add(go.Scatter(
+            x=x, y=ri, mode="lines", name="Real Index (window mean = 100)",
+            line=dict(color=REAL_COLOR, width=2.6, shape="spline", smoothing=0.3),
+            fill="tonexty", fillcolor=REAL_FILL, connectgaps=False,
+            hovertemplate="Real Index: <b>%{y:.2f}</b><extra></extra>",
+        ))
+        valid_ri = ri.dropna()
+        if len(valid_ri) > 2:
+            pk, tr, last = valid_ri.idxmax(), valid_ri.idxmin(), valid_ri.index[-1]
+            add(go.Scatter(
+                x=[pk, tr], y=[valid_ri[pk], valid_ri[tr]], mode="markers+text",
+                text=[f"Peak {valid_ri[pk]:.1f}", f"Trough {valid_ri[tr]:.1f}"],
+                textposition=["top center", "bottom center"],
+                textfont=dict(size=11, color=MUTED),
+                marker=dict(size=8, color="#fff", line=dict(color=REAL_COLOR, width=2)),
+                hoverinfo="skip", showlegend=False,
+            ))
+            add(go.Scatter(
+                x=[last], y=[valid_ri[last]], mode="markers",
+                marker=dict(size=11, color=REAL_COLOR, line=dict(color="#fff", width=3)),
+                hoverinfo="skip", showlegend=False,
+            ))
+        # Dashed reference line at 100 on the (left) Real Index axis.
         fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y", y0=100, y1=100,
-                      line=dict(color="#94A3B8", dash="dash", width=1))
+                      line=dict(color="#94A3B8", dash="dot", width=1.2))
+
+    if mode in ("Nominal", "Both"):
+        add(go.Scatter(
+            x=x, y=w["S"], mode="lines", name=f"Nominal S(t): {nominal_axis}",
+            line=dict(color=NOMINAL_COLOR, width=2.2 if both else 2.6), connectgaps=False,
+            hovertemplate="S(t): <b>%{y:,.4f}</b><extra></extra>",
+        ), secondary=True)
+        s_valid = w["S"].dropna()
+        if not s_valid.empty:
+            add(go.Scatter(
+                x=[s_valid.index[-1]], y=[s_valid.iloc[-1]], mode="markers",
+                marker=dict(size=10, color=NOMINAL_COLOR, line=dict(color="#fff", width=3)),
+                hoverinfo="skip", showlegend=False,
+            ), secondary=True)
+
+    axis_font = dict(size=12, color=MUTED)
+    if both:
+        fig.update_yaxes(title_text="Real Index", title_font=dict(color=REAL_COLOR), tickfont=axis_font,
+                         gridcolor=GRID, zeroline=False, secondary_y=False)
+        fig.update_yaxes(title_text=nominal_axis, title_font=dict(color=NOMINAL_COLOR), tickfont=axis_font,
+                         showgrid=False, zeroline=False, secondary_y=True)
+    else:
+        fig.update_yaxes(title_text="Real Index (window mean = 100)" if mode == "Real" else nominal_axis,
+                         tickfont=axis_font, gridcolor=GRID, zeroline=False)
 
     fig.update_xaxes(
-        title_text="Month",
-        rangeslider_visible=True,
-        rangeselector=dict(buttons=[
-            dict(count=5, label="5Y", step="year", stepmode="backward"),
-            dict(count=10, label="10Y", step="year", stepmode="backward"),
-            dict(count=20, label="20Y", step="year", stepmode="backward"),
-            dict(step="all", label="All"),
-        ]),
+        showgrid=False, linecolor="#CBD5E1", tickfont=axis_font,
+        showspikes=True, spikecolor="#94A3B8", spikethickness=1, spikedash="dot", spikemode="across",
+        rangeslider=dict(visible=True, thickness=0.07, bgcolor="#F1F5F9", bordercolor="#E2E8F0"),
+        rangeselector=dict(
+            buttons=[
+                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                dict(count=5, label="5Y", step="year", stepmode="backward"),
+                dict(count=10, label="10Y", step="year", stepmode="backward"),
+                dict(count=20, label="20Y", step="year", stepmode="backward"),
+                dict(step="all", label="Max"),
+            ],
+            bgcolor="#F1F5F9", activecolor="#E0E7FF", bordercolor="#E2E8F0", borderwidth=1,
+            font=dict(size=11, color="#334155"), x=0, y=1.08,
+        ),
     )
     fig.update_layout(
         template="plotly_white",
-        height=600,
+        height=560,
         hovermode="x unified",
         showlegend=True,
         font=dict(family="Inter, sans-serif", size=13, color="#334155"),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0, bgcolor="rgba(0,0,0,0)"),
-        hoverlabel=dict(bgcolor="white", bordercolor="#E2E8F0", font=dict(family="Inter, sans-serif", size=12)),
-        margin=dict(l=60, r=60, t=50, b=30),
+        legend=dict(orientation="h", yanchor="bottom", y=1.08, xanchor="right", x=1, bgcolor="rgba(0,0,0,0)",
+                    font=dict(size=12)),
+        hoverlabel=dict(bgcolor="#0F172A", bordercolor="#0F172A",
+                        font=dict(family="Inter, sans-serif", size=12, color="#F8FAFC")),
+        margin=dict(l=56, r=56 if both else 24, t=56, b=16),
     )
-    fig.update_xaxes(
-        gridcolor="#EEF2F7", linecolor="#CBD5E1",
-        showspikes=True, spikecolor="#94A3B8", spikethickness=1, spikedash="dot",
-        rangeslider=dict(thickness=0.08, bgcolor="#F1F5F9"),
-        rangeselector=dict(bgcolor="#F1F5F9", activecolor="#DBEAFE", font=dict(size=12)),
-    )
-    fig.update_yaxes(gridcolor="#EEF2F7", zeroline=False)
     return fig
 
 
 # =============================================================================
-# UI helpers
+# UI building blocks
 # =============================================================================
 def currency_label(iso: str, names: dict[str, str]) -> str:
     return CURRENCY_CODES.get(iso, f"{names.get(iso, iso)} currency")
@@ -706,6 +903,55 @@ def fmt_num(v: float) -> str:
     if v is None or not np.isfinite(v):
         return "n/a"
     return f"{v:,.4f}" if abs(v) < 10 else f"{v:,.2f}"
+
+
+def fmt_pct(v: float) -> str:
+    return "n/a" if not np.isfinite(v) else f"{v:+.1f}%"
+
+
+def tone(v: float) -> str:
+    if not np.isfinite(v) or abs(v) < 0.05:
+        return "neu"
+    return "pos" if v > 0 else "neg"
+
+
+def delta_pill(v: float, suffix: str) -> str:
+    if not np.isfinite(v):
+        return f'<span class="pill neu">—</span>{esc(suffix)}'
+    arrow = "▲" if v > 0 else ("▼" if v < 0 else "•")
+    return f'<span class="pill {tone(v)}">{arrow} {abs(v):.1f}%</span>{esc(suffix)}'
+
+
+def kpi_card(label: str, value: str, sub_html: str, icon: str) -> str:
+    return (f'<div class="kpi"><div class="kpi-top"><span class="kpi-label">{esc(label)}</span>'
+            f'<span class="kpi-icon">{icon}</span></div><div class="kpi-value">{esc(value)}</div>'
+            f'<div class="kpi-sub">{sub_html}</div></div>')
+
+
+def notes_html(notes: list[tuple[str, str]]) -> str:
+    if not notes:
+        return ""
+    items = "".join(f'<div class="note {kind}">{md_to_html(text)}</div>' for kind, text in notes)
+    return f'<div class="notes">{items}</div>'
+
+
+def decomposition_html(real_chg: float, nom_chg: float, rel_chg: float, name1: str, name2: str) -> str:
+    rows = [
+        ("Real exchange rate", real_chg),
+        ("Nominal rate · S", nom_chg),
+        (f"Relative prices · {name1} ÷ {name2}", rel_chg),
+    ]
+    finite = [abs(v) for _, v in rows if np.isfinite(v)]
+    scale = max(finite) if finite and max(finite) > 0 else 1.0
+    body = ""
+    for label, v in rows:
+        width = 0 if not np.isfinite(v) else max(3.0, abs(v) / scale * 100)
+        body += (f'<div class="dec-row"><div class="dec-label">{esc(label)}</div>'
+                 f'<div class="dec-val {tone(v)}">{fmt_pct(v)}</div>'
+                 f'<div class="dec-track"><div class="dec-bar {tone(v)}" style="width:{width:.1f}%"></div></div></div>')
+    return (f'<div class="card"><div class="eyebrow">What drove it</div>{body}'
+            f'<div class="dec-note">Effects multiply: (1 + real) = (1 + nominal) × (1 + relative prices). '
+            f'Measured from the first to the last valid month in the window.</div></div>')
 
 
 def series_coverage_table(df: pd.DataFrame, labels: dict[str, str]) -> pd.DataFrame:
@@ -721,42 +967,80 @@ def series_coverage_table(df: pd.DataFrame, labels: dict[str, str]) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+def _set_pair(a: str, b: str) -> None:
+    st.session_state["iso1"], st.session_state["iso2"] = a, b
+
+
+def _swap_pair() -> None:
+    st.session_state["iso1"], st.session_state["iso2"] = st.session_state["iso2"], st.session_state["iso1"]
+
+
 # =============================================================================
 # App
 # =============================================================================
 def main() -> None:
-    st.set_page_config(page_title="Real & Nominal Exchange Rates", page_icon="💱", layout="wide")
+    st.set_page_config(page_title=f"{APP_NAME} · Real & Nominal Exchange Rates", page_icon="💱",
+                       layout="wide", initial_sidebar_state="expanded")
     apply_styling()
-    hero()
 
-    with st.spinner("Loading country list…"):
-        countries, list_source = get_country_list()
+    countries, list_source = get_country_list()
     codes = sorted(countries, key=lambda c: countries[c].lower())
+    if st.session_state.get("iso1") not in codes:
+        st.session_state["iso1"] = "USA" if "USA" in codes else codes[0]
+    if st.session_state.get("iso2") not in codes:
+        st.session_state["iso2"] = "G163" if "G163" in codes else codes[1]
 
-    # ---- Sidebar: selections ------------------------------------------------------
-    st.sidebar.header("Settings")
-    fmt = lambda c: f"{countries.get(c, c)} ({c})"  # noqa: E731
-    iso1 = st.sidebar.selectbox("Country 1", codes, index=codes.index("USA") if "USA" in codes else 0, format_func=fmt)
-    iso2 = st.sidebar.selectbox("Country 2", codes, index=codes.index("G163") if "G163" in codes else 1, format_func=fmt)
-    invert_er = st.sidebar.checkbox(
-        "Invert IMF exchange rates",
-        value=False,
-        help="Leave unticked normally. Tick only if the IMF series turns out to be USD per local currency "
-             "(e.g. USA vs GBR shows ~1.3 instead of ~0.75 GBP per USD).",
-    )
-    st.sidebar.caption(f"Country list source: {list_source}")
+    # ---- Sidebar --------------------------------------------------------------------
+    with st.sidebar:
+        render(f"""
+        <div class="sb-brand"><div class="sb-logo">R</div>
+        <div><div class="sb-name">{APP_NAME}</div><div class="sb-tag">Exchange-rate analytics</div></div></div>
+        <div class="sb-section">Currency pair</div>
+        """)
+        fmt = lambda c: f"{countries.get(c, c)} ({c})"  # noqa: E731
+        st.selectbox("Country 1 (base)", codes, key="iso1", format_func=fmt)
+        st.button("⇅  Swap countries", on_click=_swap_pair, use_container_width=True)
+        st.selectbox("Country 2 (quote)", codes, key="iso2", format_func=fmt)
 
-    if iso1 == iso2:
-        st.error("Country 1 and Country 2 are the same. Please choose two different countries.")
-        st.stop()
+        render('<div class="sb-section">Quick pairs</div>')
+        qcols = st.columns(2)
+        for i, (a, b, label) in enumerate(p for p in QUICK_PAIRS if p[0] in codes and p[1] in codes):
+            qcols[i % 2].button(label, key=f"qp_{a}_{b}", on_click=_set_pair, args=(a, b),
+                                use_container_width=True)
 
+        render('<div class="sb-section">Sample period</div>')
+        period_slot = st.container()
+
+        render('<div class="sb-section">Settings</div>')
+        with st.expander("Advanced", expanded=False):
+            invert_er = st.checkbox(
+                "Invert IMF exchange rates",
+                value=False,
+                help="Leave unticked normally. Tick only if the IMF series turns out to be USD per local "
+                     "currency (e.g. USA vs GBR shows ~1.3 instead of ~0.75 GBP per USD).",
+            )
+        st.caption(f"Countries: {list_source}")
+
+    iso1, iso2 = st.session_state["iso1"], st.session_state["iso2"]
     name1, name2 = countries.get(iso1, iso1), countries.get(iso2, iso2)
     ccy1, ccy2 = currency_label(iso1, countries), currency_label(iso2, countries)
 
-    with st.spinner(f"Downloading data for {name1} and {name2}…"):
+    hero_slot = st.empty()
+    hero_slot.markdown(_html(hero_html(ccy1, ccy2, name1, name2)), unsafe_allow_html=True)
+
+    if iso1 == iso2:
+        st.error("Country 1 and Country 2 are the same. Choose two different countries, or pick a quick pair.")
+        st.stop()
+
+    with st.spinner(f"Fetching IMF data for {name1} and {name2}…"):
         df, messages, sources = build_dataframe(iso1, iso2, countries, invert_er)
+
+    notes: list[tuple[str, str]] = []
     for level, text in messages:
-        getattr(st, level)(text)
+        if level == "error":
+            st.error(text)
+        else:
+            notes.append(("warn" if level == "warning" else "info", text))
 
     coverage_labels = {
         "E1_LCU_per_USD": f"E1: {name1} per USD", "E2_LCU_per_USD": f"E2: {name2} per USD",
@@ -778,13 +1062,14 @@ def main() -> None:
     month_labels = [m.strftime("%Y-%m") for m in pd.date_range(first_all, last_all, freq="MS")]
 
     # ---- Sample window (resets automatically when countries change) ---------------
-    if len(month_labels) >= 2:
-        start_lbl, end_lbl = st.sidebar.select_slider(
-            "Sample period (start – end month)", options=month_labels,
-            value=(month_labels[0], month_labels[-1]), key=f"window_{iso1}_{iso2}",
-        )
-    else:
-        start_lbl = end_lbl = month_labels[0]
+    with period_slot:
+        if len(month_labels) >= 2:
+            start_lbl, end_lbl = st.select_slider(
+                "Start – end month", options=month_labels,
+                value=(month_labels[0], month_labels[-1]), key=f"window_{iso1}_{iso2}",
+            )
+        else:
+            start_lbl = end_lbl = month_labels[0]
     if start_lbl > end_lbl:
         start_lbl, end_lbl = end_lbl, start_lbl
     start_ts, end_ts = pd.Timestamp(f"{start_lbl}-01"), pd.Timestamp(f"{end_lbl}-01")
@@ -803,86 +1088,198 @@ def main() -> None:
     first_v, last_v = v.index.min(), v.index.max()
     s_nonnull = w["S"].dropna()
     latest_s = float(s_nonnull.iloc[-1]) if not s_nonnull.empty else float("nan")
-    latest_s_month = s_nonnull.index[-1].strftime("%Y-%m") if not s_nonnull.empty else "n/a"
+    latest_s_ts = s_nonnull.index[-1] if not s_nonnull.empty else last_v
+    latest_s_month = latest_s_ts.strftime("%Y-%m") if not s_nonnull.empty else "n/a"
     latest_idx = float(v["Real_Index"].iloc[-1])
 
-    # ---- Coverage warnings --------------------------------------------------------
+    # 12-month changes
+    idx_12m = pct_change(latest_idx, value_at(w, "Real_Index", last_v - pd.DateOffset(months=12)))
+    s_12m = pct_change(latest_s, value_at(w, "S", latest_s_ts - pd.DateOffset(months=12)))
+
+    # Decomposition from first to last valid month: RER = S × (P1/P2)
+    real_chg = pct_change(value_at(w, "RER", last_v), value_at(w, "RER", first_v))
+    nom_chg = pct_change(value_at(w, "S", last_v), value_at(w, "S", first_v))
+    rel_chg = pct_change(value_at(w, "P1", last_v) / value_at(w, "P2", last_v),
+                         value_at(w, "P1", first_v) / value_at(w, "P2", first_v))
+
+    dev = latest_idx - 100.0
+    pctile = float((v["Real_Index"] <= latest_idx).mean() * 100)
+    pk_ts, tr_ts = v["Real_Index"].idxmax(), v["Real_Index"].idxmin()
+
+    # ---- Hero with headline stats ----------------------------------------------------
+    hero_slot.markdown(_html(hero_html(ccy1, ccy2, name1, name2, stats=[
+        (f"1 {ccy1} =", f"{fmt_num(latest_s)} {ccy2}" if len(ccy2) <= 4 else fmt_num(latest_s), f"as of {latest_s_month}"),
+        ("Real Index", f"{latest_idx:.1f}", f"{fmt_pct(dev)} vs window mean"),
+    ])), unsafe_allow_html=True)
+
+    # ---- Coverage notes ----------------------------------------------------------------
     if first_all > START_TS:
         late = [label for col, label in coverage_labels.items()
                 if df[col].first_valid_index() is not None and df[col].first_valid_index() >= first_all]
-        st.warning(f"Limited coverage: months with all four series begin in **{first_all:%Y-%m}**, not 1976-01. "
-                   f"Latest-starting series: {', '.join(late) if late else 'n/a'}.")
+        notes.append(("warn", f"**Limited coverage:** months with all four series begin in **{first_all:%Y-%m}**, "
+                              f"not 1976-01. Latest-starting series: {', '.join(late) if late else 'n/a'}."))
     if "G163" in (iso1, iso2):
-        st.info("Euro-area note: the euro (and its IMF exchange rate) begins in 1999, so euro-area comparisons "
-                "cannot start earlier.")
+        notes.append(("info", "**Euro area:** the euro (and its IMF exchange rate) begins in 1999, so euro-area "
+                              "comparisons cannot start earlier."))
     n_window = len(w)
     if n_valid < n_window:
-        st.warning(f"{n_window - n_valid} of {n_window} months in the window lack S, P1 or P2. They are shown as gaps "
-                   "and excluded from RER* (no interpolation or forward-filling).")
+        notes.append(("warn", f"**Gaps:** {n_window - n_valid} of {n_window} months in the window lack S, P1 or P2. "
+                              "They are shown as gaps and excluded from RER* (no interpolation or forward-filling)."))
     if n_valid < 36:
-        st.warning(f"Only {n_valid} valid months: RER* (and therefore the Real Index level) is sensitive to the window.")
+        notes.append(("warn", f"**Short sample:** only {n_valid} valid months, so RER* (and the Real Index level) "
+                              "is sensitive to the window."))
 
-    # ---- Metrics ------------------------------------------------------------------
-    st.markdown(f"#### {name1} ({ccy1}) vs {name2} ({ccy2})")
-    c = st.columns(6)
-    c[0].metric("RER*", fmt_num(rer_star), help="Mean of RER(t) = S·P1/P2 over valid months in the window")
-    c[1].metric("Valid months", f"{n_valid}")
-    c[2].metric("First valid month", first_v.strftime("%Y-%m"))
-    c[3].metric("Last valid month", last_v.strftime("%Y-%m"))
-    c[4].metric(f"Latest S ({latest_s_month})", fmt_num(latest_s), help=f"{ccy2} per 1 {ccy1}")
-    c[5].metric(f"Latest Real Index ({last_v:%Y-%m})", f"{latest_idx:.2f}")
-    st.caption(f"Check: mean Real Index over valid months = **{v['Real_Index'].mean():.4f}** (should be 100).")
+    tab_overview, tab_data, tab_method = st.tabs(["Overview", "Data", "Methodology"])
 
-    st.info(f"**Interpretation:** an increase in the Real Index means **{name1}'s currency ({ccy1}) has appreciated "
-            f"in real terms** against {name2}'s currency ({ccy2}). S(t) is shown in actual units: {ccy2} per 1 {ccy1}.")
+    # =========================== Overview ===========================
+    with tab_overview:
+        render(notes_html(notes))
 
-    # ---- Chart --------------------------------------------------------------------
-    mode = st.radio("Chart", ["Real", "Nominal", "Both"], index=2, horizontal=True)
-    try:
-        st.plotly_chart(make_chart(w, mode, ccy1, ccy2), use_container_width=True)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Could not draw the chart: {exc}")
+        cards = [
+            kpi_card("Real Index", f"{latest_idx:.2f}", delta_pill(idx_12m, " vs 12m ago"), "📈"),
+            kpi_card(f"S · {ccy2} per {ccy1}", fmt_num(latest_s), delta_pill(s_12m, " vs 12m ago"), "💱"),
+            kpi_card("RER*", fmt_num(rer_star), "Window mean of S·P1/P2", "⚖️"),
+            kpi_card("Valid months", f"{n_valid:,}", f"of {n_window:,} in window", "🗓️"),
+            kpi_card("First valid month", first_v.strftime("%b %Y"), first_v.strftime("%Y-%m"), "⏮️"),
+            kpi_card("Last valid month", last_v.strftime("%b %Y"), last_v.strftime("%Y-%m"), "⏭️"),
+        ]
+        render(f'<div class="kpi-grid">{"".join(cards)}</div>')
 
-    # ---- CSV download -------------------------------------------------------------
+        direction = "appreciated" if real_chg > 0 else "depreciated"
+        chg_cls = "pos" if real_chg > 0 else "neg"
+        head = (f'{esc(ccy1)} has <span class="{chg_cls}">{direction} {abs(real_chg):.1f}%</span> '
+                f'in real terms against {esc(ccy2)}') if np.isfinite(real_chg) else "Real exchange rate"
+        body = (f"Between {first_v:%b %Y} and {last_v:%b %Y}, the nominal rate moved {fmt_pct(nom_chg)} and "
+                f"relative prices ({esc(name1)} vs {esc(name2)}) moved {fmt_pct(rel_chg)}. "
+                f"An increase in the Real Index means {esc(name1)}'s currency has appreciated in real terms "
+                f"against {esc(name2)}'s currency.")
+        chips = [
+            f"{abs(dev):.1f}% {'above' if dev >= 0 else 'below'} window average",
+            f"Higher than {pctile:.0f}% of months",
+            f"Peak {pk_ts:%b %Y} · {v.at[pk_ts, 'Real_Index']:.1f}",
+            f"Trough {tr_ts:%b %Y} · {v.at[tr_ts, 'Real_Index']:.1f}",
+        ]
+        insight = (f'<div class="card"><div class="eyebrow">Insight</div><div class="insight-head">{head}</div>'
+                   f'<div class="insight-body">{body}</div>'
+                   f'<div class="chips">{"".join(f"<span class=chip>{esc(c)}</span>" for c in chips)}</div></div>')
+
+        c_left, c_right = st.columns([1.55, 1], gap="medium")
+        with c_left:
+            render(insight)
+        with c_right:
+            render(decomposition_html(real_chg, nom_chg, rel_chg, ccy1 if ccy1 in CURRENCY_CODES.values() else name1,
+                                      ccy2 if ccy2 in CURRENCY_CODES.values() else name2))
+
+        h_left, h_right = st.columns([1, 1], vertical_alignment="bottom")
+        with h_left:
+            render(f'<div class="section-head"><div><div class="section-title">Exchange-rate history</div>'
+                   f'<div class="section-meta">{start_lbl} → {end_lbl} · monthly · {esc(ccy2)} per 1 {esc(ccy1)}</div>'
+                   f'</div></div>')
+        with h_right:
+            mode = st.radio("Chart", ["Real", "Nominal", "Both"], index=2, horizontal=True,
+                            label_visibility="collapsed")
+        try:
+            st.plotly_chart(
+                make_chart(w, mode, ccy1, ccy2), use_container_width=True,
+                config={
+                    "displaylogo": False,
+                    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+                    "toImageButtonOptions": {"filename": f"RealFX_{iso1}_{iso2}_{start_lbl}_{end_lbl}", "scale": 2},
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not draw the chart: {exc}")
+
+    # =========================== Data ===========================
     out = w.copy()
     out.insert(0, "date", out.index.strftime("%Y-%m"))
     out = out[["date", "E1_LCU_per_USD", "E2_LCU_per_USD", "S", "P1", "P2", "RER",
                "valid_flag", "RER_star", "Real_Index"]]
-    st.download_button(
-        "⬇️ Download data (CSV)",
-        data=out.to_csv(index=False).encode("utf-8"),
-        file_name=f"RER_{iso1}_{iso2}_{start_lbl}_{end_lbl}.csv",
-        mime="text/csv",
-    )
-
-    # ---- Documentation ------------------------------------------------------------
-    with st.expander("Data coverage by series"):
+    with tab_data:
+        d_left, d_right = st.columns([3, 1], vertical_alignment="bottom")
+        with d_left:
+            render(f'<div class="section-head"><div><div class="section-title">Monthly observations</div>'
+                   f'<div class="section-meta">{len(out):,} months · {start_lbl} → {end_lbl} · newest first</div>'
+                   f'</div></div>')
+        with d_right:
+            st.download_button(
+                "⬇  Download CSV",
+                data=out.to_csv(index=False).encode("utf-8"),
+                file_name=f"RER_{iso1}_{iso2}_{start_lbl}_{end_lbl}.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True,
+            )
+        st.dataframe(
+            out.iloc[::-1],
+            hide_index=True,
+            use_container_width=True,
+            height=480,
+            column_config={
+                "date": st.column_config.TextColumn("Month"),
+                "E1_LCU_per_USD": st.column_config.NumberColumn(f"E1 · {ccy1}/USD", format="%.4f"),
+                "E2_LCU_per_USD": st.column_config.NumberColumn(f"E2 · {ccy2}/USD", format="%.4f"),
+                "S": st.column_config.NumberColumn(f"S · {ccy2}/{ccy1}", format="%.4f"),
+                "P1": st.column_config.NumberColumn(f"P1 · {ccy1} prices", format="%.2f"),
+                "P2": st.column_config.NumberColumn(f"P2 · {ccy2} prices", format="%.2f"),
+                "RER": st.column_config.NumberColumn("RER", format="%.4f"),
+                "valid_flag": st.column_config.CheckboxColumn("Valid"),
+                "RER_star": st.column_config.NumberColumn("RER*", format="%.4f"),
+                "Real_Index": st.column_config.NumberColumn("Real Index", format="%.2f"),
+            },
+        )
+        render('<div class="section-head"><div><div class="section-title">Coverage by series</div>'
+               '<div class="section-meta">Full download, before the sample window is applied</div></div></div>')
         st.dataframe(series_coverage_table(df, coverage_labels), hide_index=True, use_container_width=True)
 
-    with st.expander("Formulas, conventions and data sources"):
-        st.markdown(f"""
-**Definitions**
+    # =========================== Methodology ===========================
+    with tab_method:
+        m_left, m_right = st.columns([1.3, 1], gap="large")
+        with m_left:
+            st.markdown(f"""
+#### Formulas
 
-- $E_i(t)$ = IMF period-average exchange rate: units of country *i* currency per 1 USD
-  (dataflow `{AGENCY},{ER_DATAFLOW},{DATAFLOW_VERSIONS[ER_DATAFLOW]}`, key `{{ISO3}}.XDC_USD.PA_RT.M`,
-  fallback `{{ISO3}}.USD_XDC.PA_RT.M`). For the United States $E=1$ every month.
-- $S(t) = E_2(t)/E_1(t)$ = units of **Country 2** currency per 1 unit of **Country 1** currency.
-- $P_1(t), P_2(t)$ = monthly headline CPI (dataflow `{AGENCY},{CPI_DATAFLOW},{DATAFLOW_VERSIONS[CPI_DATAFLOW]}`,
-  key `{{ISO3}}.CPI._T.IX.M`). For the euro area, which publishes an HICP rather than a CPI, the app falls back
-  to an IMF HICP key and then to Eurostat's euro-area HICP (all items, monthly index).
+- $E_i(t)$ = IMF period-average exchange rate: units of country *i* currency per 1 USD.
+  For the United States, $E = 1$ every month.
+- $S(t) = E_2(t) / E_1(t)$ = units of **Country 2** currency per 1 unit of **Country 1** currency
+  (the dollar cancels: LCU2/USD ÷ LCU1/USD = LCU2/LCU1).
+- $P_1(t), P_2(t)$ = monthly headline consumer price indices.
 - $RER(t) = S(t)\\,P_1(t)/P_2(t)$
-- $RER^* = $ mean of $RER(t)$ over valid months in the selected window.
+- $RER^*$ = mean of $RER(t)$ over valid months in the selected window
+  (S, P1 and P2 all present and positive).
 - $\\text{{Real Index}}(t) = 100 \\times RER(t)/RER^*$
 
-**Direction:** a higher Real Index = real appreciation of Country 1's currency against Country 2's.
+**Direction:** an increase in the Real Index means Country 1's currency has appreciated in real terms
+against Country 2's currency.
 
-**Notes:** price-index bases differ, so only movements in the index are meaningful. Rebased series can show
-breaks. Gaps stay gaps. Euro-area exchange rates start in 1999. Data are cached for 24 hours.
-
-**URLs used in this run**
+**Check:** mean Real Index over valid months in this window = **{v['Real_Index'].mean():.4f}** (should be 100).
 """)
-        for label, url in sources:
-            st.markdown(f"- {label}: `{url}`")
+        with m_right:
+            st.markdown(f"""
+#### Data sources
+
+- **IMF SDMX 3.0 API** · `{IMF_BASE_URL}`
+- Exchange rates · dataflow `{AGENCY},{ER_DATAFLOW},{DATAFLOW_VERSIONS[ER_DATAFLOW]}`,
+  key `{{ISO3}}.XDC_USD.PA_RT.M` (fallback `{{ISO3}}.USD_XDC.PA_RT.M`)
+- Prices · dataflow `{AGENCY},{CPI_DATAFLOW},{DATAFLOW_VERSIONS[CPI_DATAFLOW]}`, key `{{ISO3}}.CPI._T.IX.M`
+- Euro area (`G163`) prices · IMF HICP key if available, otherwise **Eurostat HICP**
+  (all items, monthly index)
+
+#### Limitations
+
+Price-index bases differ, so only movements in the index are meaningful. Rebased series can show breaks.
+Gaps stay gaps. Euro-area exchange rates start in 1999. Data are cached for 24 hours.
+""")
+        with st.expander("URLs used in this run"):
+            for label, url in sources:
+                st.markdown(f"- {label}: `{url}`")
+
+    render(f"""
+    <div class="app-footer">
+    <div>{APP_NAME} · Data: IMF SDMX 3.0 (CPI, ER) · Eurostat HICP fallback for the euro area</div>
+    <div>For research and education · not investment advice</div>
+    </div>
+    """)
 
 
 if __name__ == "__main__":
