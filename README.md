@@ -56,3 +56,5 @@ Index are meaningful, not its level.
 - **Empty or gappy charts:** the selected window may contain no months where both exchange rates and both CPIs
   overlap. Widen the sample period, or pick countries with longer coverage. Use **Manage app → Reboot** to clear
   the cache after an IMF outage.
+
+  - **HTTP 401/403 from the IMF:** the API may require a subscription key. In Streamlit Cloud open **App settings → Secrets** and add `IMF_SUBSCRIPTION_KEY = "your-key"`, then reboot the app. No code change is needed.
