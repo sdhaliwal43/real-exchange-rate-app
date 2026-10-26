@@ -63,8 +63,65 @@ ACCEPT_JSON = "application/vnd.sdmx.data+json;version=2.0.0"
 ACCEPT_STRUCT_JSON = "application/vnd.sdmx.structure+json;version=2.0.0"
 ACCEPT_STRUCT_XML = "application/vnd.sdmx.structure+xml;version=3.0.0"
 
-REAL_COLOR = "#1f77b4"
-NOMINAL_COLOR = "#d62728"
+REAL_COLOR = "#2563EB"     # blue: Real Index
+NOMINAL_COLOR = "#F97316"  # orange: nominal S(t)
+
+
+def apply_styling() -> None:
+    """Custom look: Inter font, banner header, card-style metrics, chart and expander panels."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        html, body, p, li, label, h1, h2, h3, h4, .stMarkdown { font-family: 'Inter', sans-serif; }
+        .block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1300px; }
+
+        .hero {
+            background: linear-gradient(135deg, #1E3A8A 0%, #2563EB 55%, #0EA5E9 100%);
+            color: #fff; padding: 1.6rem 2rem; border-radius: 16px; margin-bottom: 1.5rem;
+            box-shadow: 0 10px 30px rgba(37, 99, 235, 0.18);
+        }
+        .hero h1 { color: #fff; font-size: 2rem; font-weight: 700; margin: 0.2rem 0 0.3rem 0; padding: 0; }
+        .hero p { color: rgba(255, 255, 255, 0.88); margin: 0; font-size: 1rem; }
+        .hero-kicker {
+            text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.72rem;
+            font-weight: 600; color: rgba(255, 255, 255, 0.75);
+        }
+
+        [data-testid="stMetric"] {
+            background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 12px;
+            padding: 0.9rem 1rem; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+        }
+        [data-testid="stMetricLabel"] p { font-size: 0.78rem; color: #64748B; font-weight: 500; }
+        [data-testid="stMetricValue"] { font-size: 1.35rem; font-weight: 700; color: #0F172A; }
+
+        [data-testid="stSidebar"] { border-right: 1px solid #E2E8F0; }
+        [data-testid="stPlotlyChart"] {
+            background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 14px; padding: 0.5rem;
+        }
+        [data-testid="stExpander"] details {
+            background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 12px;
+        }
+        .stDownloadButton button { border-radius: 10px; font-weight: 600; }
+        #MainMenu, footer { visibility: hidden; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def hero() -> None:
+    """Banner header at the top of the page."""
+    st.markdown(
+        """
+        <div class="hero">
+            <div class="hero-kicker">IMF · SDMX 3.0 · Monthly data since 1976</div>
+            <h1>Real &amp; Nominal Exchange Rates</h1>
+            <p>Compare any two currencies in nominal terms and after adjusting for inflation.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 FALLBACK_COUNTRIES: dict[str, tuple[str, str]] = {
     "USA": ("United States", "USD"),
