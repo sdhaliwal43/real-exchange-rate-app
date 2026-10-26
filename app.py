@@ -14,6 +14,10 @@ Downloads monthly CPI and exchange-rate data from the IMF SDMX 3.0 API and compu
 Direction convention: an INCREASE in the Real Index means Country 1's currency has
 APPRECIATED in real terms against Country 2's currency.
 
+Euro area prices: the euro area publishes an HICP rather than a national CPI. If the IMF
+has no euro-area CPI, the app falls back to an HICP key at the IMF, then to Eurostat's
+euro-area HICP.
+
 Run with:  streamlit run app.py
 """
 
@@ -39,7 +43,7 @@ CPI_DATAFLOW = "CPI"
 ER_DATAFLOW = "ER"
 
 # Dataflow versions verified live after the IMF's May-2026 SDMX 3.0 refactor.
-# If the IMF publishes new versions, update these (or the URL builder falls back to "+").
+# If the IMF publishes new versions, update these (later URL candidates use "+" = latest).
 DATAFLOW_VERSIONS = {CPI_DATAFLOW: "5.0.0", ER_DATAFLOW: "4.0.1"}
 
 CPI_KEY_TEMPLATE = "{iso3}.CPI._T.IX.M"   # headline CPI, all items, index, monthly
@@ -48,13 +52,24 @@ CPI_KEY_TEMPLATE = "{iso3}.CPI._T.IX.M"   # headline CPI, all items, index, mont
 # post-refactor live tests; if it is used, check the orientation (see sidebar toggle).
 ER_KEY_TEMPLATES = ("{iso3}.XDC_USD.PA_RT.M", "{iso3}.USD_XDC.PA_RT.M")
 
+# Extra price-index keys to try when the main CPI key returns nothing.
+# The euro area publishes an HICP (Harmonised Index of Consumer Prices), not a national CPI.
+CPI_FALLBACK_KEYS = {
+    "G163": ["G163.HICP._T.IX.M"],
+}
+# Last resort for the euro area: Eurostat HICP, all items (CP00), euro area (EA), monthly index.
+EUROSTAT_HICP_URL = (
+    "https://ec.europa.eu/eurostat/api/dissemination/sdmx/2.1/data/"
+    "prc_hicp_midx/M..CP00.EA?format=SDMX-CSV&startPeriod=1996-01"
+)
+
 START_PERIOD = "1976-01"
 START_TS = pd.Timestamp("1976-01-01")
 
 REQUEST_TIMEOUT = (10, 45)    # (connect, read) seconds
 CACHE_TTL = 24 * 60 * 60      # 24 hours
 USER_AGENT = (
-    "RER-Explorer/1.1 (Streamlit Community Cloud; educational real-exchange-rate app; "
+    "RER-Explorer/1.2 (Streamlit Community Cloud; educational real-exchange-rate app; "
     "python-requests)"
 )
 
@@ -66,7 +81,58 @@ ACCEPT_STRUCT_XML = "application/vnd.sdmx.structure+xml;version=3.0.0"
 REAL_COLOR = "#2563EB"     # blue: Real Index
 NOMINAL_COLOR = "#F97316"  # orange: nominal S(t)
 
+FALLBACK_COUNTRIES: dict[str, tuple[str, str]] = {
+    "USA": ("United States", "USD"),
+    "G163": ("Euro area", "EUR"),
+    "GBR": ("United Kingdom", "GBP"),
+    "JPN": ("Japan", "JPY"),
+    "CHN": ("China", "CNY"),
+    "CAN": ("Canada", "CAD"),
+    "CHE": ("Switzerland", "CHF"),
+    "AUS": ("Australia", "AUD"),
+    "NZL": ("New Zealand", "NZD"),
+    "IND": ("India", "INR"),
+    "BRA": ("Brazil", "BRL"),
+    "MEX": ("Mexico", "MXN"),
+    "KOR": ("Korea, Republic of", "KRW"),
+    "ZAF": ("South Africa", "ZAR"),
+    "SWE": ("Sweden", "SEK"),
+    "NOR": ("Norway", "NOK"),
+    "DNK": ("Denmark", "DKK"),
+    "POL": ("Poland", "PLN"),
+    "CZE": ("Czech Republic", "CZK"),
+    "HUN": ("Hungary", "HUF"),
+    "TUR": ("Türkiye", "TRY"),
+    "RUS": ("Russian Federation", "RUB"),
+    "IDN": ("Indonesia", "IDR"),
+    "MYS": ("Malaysia", "MYR"),
+    "THA": ("Thailand", "THB"),
+    "PHL": ("Philippines", "PHP"),
+    "SGP": ("Singapore", "SGD"),
+    "HKG": ("Hong Kong SAR", "HKD"),
+    "ISR": ("Israel", "ILS"),
+    "SAU": ("Saudi Arabia", "SAR"),
+    "ARE": ("United Arab Emirates", "AED"),
+    "EGY": ("Egypt", "EGP"),
+    "NGA": ("Nigeria", "NGN"),
+    "KEN": ("Kenya", "KES"),
+    "ARG": ("Argentina", "ARS"),
+    "CHL": ("Chile", "CLP"),
+    "COL": ("Colombia", "COP"),
+    "PER": ("Peru", "PEN"),
+    "PAK": ("Pakistan", "PKR"),
+    "VNM": ("Vietnam", "VND"),
+}
+CURRENCY_CODES = {iso: ccy for iso, (_, ccy) in FALLBACK_COUNTRIES.items()}
 
+
+def _empty_series() -> pd.Series:
+    return pd.Series(dtype="float64")
+
+
+# =============================================================================
+# Styling
+# =============================================================================
 def apply_styling() -> None:
     """Custom look: Inter font, banner header, card-style metrics, chart and expander panels."""
     st.markdown(
@@ -122,54 +188,6 @@ def hero() -> None:
         """,
         unsafe_allow_html=True,
     )
-
-FALLBACK_COUNTRIES: dict[str, tuple[str, str]] = {
-    "USA": ("United States", "USD"),
-    "G163": ("Euro area", "EUR"),
-    "GBR": ("United Kingdom", "GBP"),
-    "JPN": ("Japan", "JPY"),
-    "CHN": ("China", "CNY"),
-    "CAN": ("Canada", "CAD"),
-    "CHE": ("Switzerland", "CHF"),
-    "AUS": ("Australia", "AUD"),
-    "NZL": ("New Zealand", "NZD"),
-    "IND": ("India", "INR"),
-    "BRA": ("Brazil", "BRL"),
-    "MEX": ("Mexico", "MXN"),
-    "KOR": ("Korea, Republic of", "KRW"),
-    "ZAF": ("South Africa", "ZAR"),
-    "SWE": ("Sweden", "SEK"),
-    "NOR": ("Norway", "NOK"),
-    "DNK": ("Denmark", "DKK"),
-    "POL": ("Poland", "PLN"),
-    "CZE": ("Czech Republic", "CZK"),
-    "HUN": ("Hungary", "HUF"),
-    "TUR": ("Türkiye", "TRY"),
-    "RUS": ("Russian Federation", "RUB"),
-    "IDN": ("Indonesia", "IDR"),
-    "MYS": ("Malaysia", "MYR"),
-    "THA": ("Thailand", "THB"),
-    "PHL": ("Philippines", "PHP"),
-    "SGP": ("Singapore", "SGD"),
-    "HKG": ("Hong Kong SAR", "HKD"),
-    "ISR": ("Israel", "ILS"),
-    "SAU": ("Saudi Arabia", "SAR"),
-    "ARE": ("United Arab Emirates", "AED"),
-    "EGY": ("Egypt", "EGP"),
-    "NGA": ("Nigeria", "NGN"),
-    "KEN": ("Kenya", "KES"),
-    "ARG": ("Argentina", "ARS"),
-    "CHL": ("Chile", "CLP"),
-    "COL": ("Colombia", "COP"),
-    "PER": ("Peru", "PEN"),
-    "PAK": ("Pakistan", "PKR"),
-    "VNM": ("Vietnam", "VND"),
-}
-CURRENCY_CODES = {iso: ccy for iso, (_, ccy) in FALLBACK_COUNTRIES.items()}
-
-
-def _empty_series() -> pd.Series:
-    return pd.Series(dtype="float64")
 
 
 # =============================================================================
@@ -474,6 +492,51 @@ def fetch_exchange_rate(iso: str) -> dict:
             "error": " | ".join(errors), "tried": all_tried, "key": ER_KEY_TEMPLATES[0].format(iso3=iso)}
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _fetch_eurostat_hicp_cached() -> pd.Series:
+    """Download the euro-area HICP from Eurostat. Raises on failure (failures are not cached)."""
+    resp = requests.get(EUROSTAT_HICP_URL, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    df = pd.read_csv(io.StringIO(resp.text), dtype=str)
+    # Eurostat returns several index bases (e.g. 2025=100, 2015=100). Keep one, newest base first.
+    unit_col = next((c for c in df.columns if c.split(":")[0].strip().lower() == "unit"), None)
+    if unit_col is not None:
+        units = df[unit_col].str.split(":").str[0].str.strip()
+        for pref in ("I25", "I15", "I05", "I96"):
+            if (units == pref).any():
+                df = df[units == pref]
+                break
+    s = _parse_sdmx_csv(df.to_csv(index=False))
+    if s.empty:
+        raise RuntimeError("Eurostat returned no HICP observations")
+    return s
+
+
+def fetch_cpi(iso: str) -> dict:
+    """Fetch a monthly consumer price index: IMF CPI first, then fallback keys,
+    then (euro area only) Eurostat HICP. Returns {series, url, error, tried, key, source}."""
+    keys = [CPI_KEY_TEMPLATE.format(iso3=iso)] + CPI_FALLBACK_KEYS.get(iso, [])
+    tried: list[str] = []
+    errors: list[str] = []
+    for key in keys:
+        res = fetch_series(CPI_DATAFLOW, key)
+        if not res["error"]:
+            res["key"], res["source"] = key, "IMF"
+            return res
+        tried.extend(res["tried"])
+        errors.append(f"{key}: {res['error']}")
+    if iso == "G163":
+        try:
+            s = _fetch_eurostat_hicp_cached()
+            return {"series": s, "url": EUROSTAT_HICP_URL, "error": None, "tried": tried + [EUROSTAT_HICP_URL],
+                    "key": "Eurostat HICP prc_hicp_midx (all items, EA)", "source": "Eurostat"}
+        except Exception as exc:  # noqa: BLE001
+            tried.append(EUROSTAT_HICP_URL)
+            errors.append(f"Eurostat HICP: {exc}")
+    return {"series": _empty_series(), "url": tried[-1] if tried else "", "error": " | ".join(errors),
+            "tried": tried, "key": keys[0], "source": "IMF"}
+
+
 def build_dataframe(iso1: str, iso2: str, names: dict[str, str],
                     invert_er: bool = False) -> tuple[pd.DataFrame, list, list]:
     """Download E1, E2, P1, P2 and merge them on month (outer join, gaps kept as NaN)."""
@@ -501,21 +564,24 @@ def build_dataframe(iso1: str, iso2: str, names: dict[str, str],
                                           f"`{ER_DATAFLOW}`.\n\nReason: {res['error']}\n\nURLs tried:\n{tried}"))
             elif res["key"] != ER_KEY_TEMPLATES[0].format(iso3=iso):
                 messages.append(("info", f"{name}: the IMF returned data under the alternative key "
-                                         f"`{res['key']}`. Check that S(t) looks right (see test 1). If it "
-                                         "looks like the reciprocal, tick **Invert IMF exchange rates** in the sidebar."))
+                                         f"`{res['key']}`. Check that S(t) looks right. If it looks like "
+                                         "the reciprocal, tick **Invert IMF exchange rates** in the sidebar."))
             sources.append((f"E{slot}: {name} exchange rate ({res['key']})"
                             + (" — inverted" if invert_er else ""), res["url"]))
 
         # --- CPI: P_i(t) ---------------------------------------------------------------
         p_col = f"P{slot}"
-        key = CPI_KEY_TEMPLATE.format(iso3=iso)
-        res = fetch_series(CPI_DATAFLOW, key)
+        res = fetch_cpi(iso)
         cols[p_col] = res["series"]
         if res["error"]:
             tried = "\n".join(f"- {u}" for u in res["tried"]) or "- (none)"
-            messages.append(("error", f"**No CPI data for {name} ({iso})** — series "
-                                      f"`{CPI_DATAFLOW}/{key}`.\n\nReason: {res['error']}\n\nURLs tried:\n{tried}"))
-        sources.append((f"P{slot}: {name} CPI ({key})", res["url"]))
+            messages.append(("error", f"**No CPI data for {name} ({iso})**.\n\nReason: {res['error']}"
+                                      f"\n\nURLs tried:\n{tried}"))
+        elif res["source"] == "Eurostat":
+            messages.append(("info", f"{name}: the IMF has no series under `{CPI_KEY_TEMPLATE.format(iso3=iso)}`, "
+                                     "so P is Eurostat's euro-area HICP (all items, monthly index). The index base "
+                                     "doesn't matter because the Real Index is normalised to its own mean."))
+        sources.append((f"P{slot}: {name} price index ({res['key']})", res["url"]))
 
     order = ["E1_LCU_per_USD", "E2_LCU_per_USD", "P1", "P2"]
     df = pd.concat([cols[c].rename(c) for c in order], axis=1)
@@ -550,7 +616,7 @@ def compute_rer(df: pd.DataFrame, start: pd.Timestamp | None = None,
 
     e1 = w["E1_LCU_per_USD"].where(w["E1_LCU_per_USD"] > 0)
     e2 = w["E2_LCU_per_USD"].where(w["E2_LCU_per_USD"] > 0)
-    w["S"] = e2 / e1
+    w["S"] = e2 / e1                                   # Country 2 currency per 1 Country 1 currency
     w["RER"] = w["S"] * w["P1"] / w["P2"]
 
     valid = w["S"].gt(0) & w["P1"].gt(0) & w["P2"].gt(0) & w["RER"].notna()
@@ -593,8 +659,9 @@ def make_chart(w: pd.DataFrame, mode: str, ccy1: str, ccy2: str) -> go.Figure:
         fig.update_yaxes(title_text=nominal_axis)
 
     if mode in ("Real", "Both"):
+        # Reference line at 100 on the (left) Real Index axis.
         fig.add_shape(type="line", xref="paper", x0=0, x1=1, yref="y", y0=100, y1=100,
-                      line=dict(color="gray", dash="dash", width=1))
+                      line=dict(color="#94A3B8", dash="dash", width=1))
 
     fig.update_xaxes(
         title_text="Month",
@@ -606,7 +673,7 @@ def make_chart(w: pd.DataFrame, mode: str, ccy1: str, ccy2: str) -> go.Figure:
             dict(step="all", label="All"),
         ]),
     )
-      fig.update_layout(
+    fig.update_layout(
         template="plotly_white",
         height=600,
         hovermode="x unified",
@@ -666,6 +733,7 @@ def main() -> None:
         countries, list_source = get_country_list()
     codes = sorted(countries, key=lambda c: countries[c].lower())
 
+    # ---- Sidebar: selections ------------------------------------------------------
     st.sidebar.header("Settings")
     fmt = lambda c: f"{countries.get(c, c)} ({c})"  # noqa: E731
     iso1 = st.sidebar.selectbox("Country 1", codes, index=codes.index("USA") if "USA" in codes else 0, format_func=fmt)
@@ -685,14 +753,14 @@ def main() -> None:
     name1, name2 = countries.get(iso1, iso1), countries.get(iso2, iso2)
     ccy1, ccy2 = currency_label(iso1, countries), currency_label(iso2, countries)
 
-    with st.spinner(f"Downloading IMF data for {name1} and {name2}…"):
+    with st.spinner(f"Downloading data for {name1} and {name2}…"):
         df, messages, sources = build_dataframe(iso1, iso2, countries, invert_er)
     for level, text in messages:
         getattr(st, level)(text)
 
     coverage_labels = {
         "E1_LCU_per_USD": f"E1: {name1} per USD", "E2_LCU_per_USD": f"E2: {name2} per USD",
-        "P1": f"P1: {name1} CPI", "P2": f"P2: {name2} CPI",
+        "P1": f"P1: {name1} prices", "P2": f"P2: {name2} prices",
     }
 
     if df.empty:
@@ -702,13 +770,14 @@ def main() -> None:
     full, _ = compute_rer(df)
     valid_months = full.index[full["valid_flag"]]
     if len(valid_months) == 0:
-        st.error(f"There are no months where the exchange rates and CPIs of {name1} and {name2} all overlap.")
+        st.error(f"There are no months where the exchange rates and price indices of {name1} and {name2} all overlap.")
         st.dataframe(series_coverage_table(df, coverage_labels), hide_index=True, use_container_width=True)
         st.stop()
 
     first_all, last_all = valid_months.min(), valid_months.max()
     month_labels = [m.strftime("%Y-%m") for m in pd.date_range(first_all, last_all, freq="MS")]
 
+    # ---- Sample window (resets automatically when countries change) ---------------
     if len(month_labels) >= 2:
         start_lbl, end_lbl = st.sidebar.select_slider(
             "Sample period (start – end month)", options=month_labels,
@@ -720,6 +789,7 @@ def main() -> None:
         start_lbl, end_lbl = end_lbl, start_lbl
     start_ts, end_ts = pd.Timestamp(f"{start_lbl}-01"), pd.Timestamp(f"{end_lbl}-01")
 
+    # ---- Economics over the selected window (recomputed on every change) ----------
     w, rer_star = compute_rer(df, start_ts, end_ts)
     w = w.reindex(pd.date_range(start_ts, end_ts, freq="MS"))
     w["valid_flag"] = w["valid_flag"].fillna(False).astype(bool)
@@ -736,6 +806,7 @@ def main() -> None:
     latest_s_month = s_nonnull.index[-1].strftime("%Y-%m") if not s_nonnull.empty else "n/a"
     latest_idx = float(v["Real_Index"].iloc[-1])
 
+    # ---- Coverage warnings --------------------------------------------------------
     if first_all > START_TS:
         late = [label for col, label in coverage_labels.items()
                 if df[col].first_valid_index() is not None and df[col].first_valid_index() >= first_all]
@@ -751,6 +822,8 @@ def main() -> None:
     if n_valid < 36:
         st.warning(f"Only {n_valid} valid months: RER* (and therefore the Real Index level) is sensitive to the window.")
 
+    # ---- Metrics ------------------------------------------------------------------
+    st.markdown(f"#### {name1} ({ccy1}) vs {name2} ({ccy2})")
     c = st.columns(6)
     c[0].metric("RER*", fmt_num(rer_star), help="Mean of RER(t) = S·P1/P2 over valid months in the window")
     c[1].metric("Valid months", f"{n_valid}")
@@ -763,12 +836,14 @@ def main() -> None:
     st.info(f"**Interpretation:** an increase in the Real Index means **{name1}'s currency ({ccy1}) has appreciated "
             f"in real terms** against {name2}'s currency ({ccy2}). S(t) is shown in actual units: {ccy2} per 1 {ccy1}.")
 
+    # ---- Chart --------------------------------------------------------------------
     mode = st.radio("Chart", ["Real", "Nominal", "Both"], index=2, horizontal=True)
     try:
         st.plotly_chart(make_chart(w, mode, ccy1, ccy2), use_container_width=True)
     except Exception as exc:  # noqa: BLE001
         st.error(f"Could not draw the chart: {exc}")
 
+    # ---- CSV download -------------------------------------------------------------
     out = w.copy()
     out.insert(0, "date", out.index.strftime("%Y-%m"))
     out = out[["date", "E1_LCU_per_USD", "E2_LCU_per_USD", "S", "P1", "P2", "RER",
@@ -780,6 +855,7 @@ def main() -> None:
         mime="text/csv",
     )
 
+    # ---- Documentation ------------------------------------------------------------
     with st.expander("Data coverage by series"):
         st.dataframe(series_coverage_table(df, coverage_labels), hide_index=True, use_container_width=True)
 
@@ -792,14 +868,15 @@ def main() -> None:
   fallback `{{ISO3}}.USD_XDC.PA_RT.M`). For the United States $E=1$ every month.
 - $S(t) = E_2(t)/E_1(t)$ = units of **Country 2** currency per 1 unit of **Country 1** currency.
 - $P_1(t), P_2(t)$ = monthly headline CPI (dataflow `{AGENCY},{CPI_DATAFLOW},{DATAFLOW_VERSIONS[CPI_DATAFLOW]}`,
-  key `{{ISO3}}.CPI._T.IX.M`).
+  key `{{ISO3}}.CPI._T.IX.M`). For the euro area, which publishes an HICP rather than a CPI, the app falls back
+  to an IMF HICP key and then to Eurostat's euro-area HICP (all items, monthly index).
 - $RER(t) = S(t)\\,P_1(t)/P_2(t)$
 - $RER^* = $ mean of $RER(t)$ over valid months in the selected window.
 - $\\text{{Real Index}}(t) = 100 \\times RER(t)/RER^*$
 
 **Direction:** a higher Real Index = real appreciation of Country 1's currency against Country 2's.
 
-**Notes:** CPI bases differ, so only movements in the index are meaningful. Rebased CPI series can show
+**Notes:** price-index bases differ, so only movements in the index are meaningful. Rebased series can show
 breaks. Gaps stay gaps. Euro-area exchange rates start in 1999. Data are cached for 24 hours.
 
 **URLs used in this run**
