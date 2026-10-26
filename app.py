@@ -570,12 +570,12 @@ def make_chart(w: pd.DataFrame, mode: str, ccy1: str, ccy2: str) -> go.Figure:
     nominal_axis = f"{ccy2} per 1 {ccy1}"
     real_trace = go.Scatter(
         x=x, y=w["Real_Index"], mode="lines", name="Real Index (mean = 100)",
-        line=dict(color=REAL_COLOR, width=2), connectgaps=False,
+        line=dict(color=REAL_COLOR, width=2.5), connectgaps=False,
         hovertemplate="Real Index: %{y:.2f}<extra></extra>",
     )
     nominal_trace = go.Scatter(
         x=x, y=w["S"], mode="lines", name=f"Nominal S(t): {nominal_axis}",
-        line=dict(color=NOMINAL_COLOR, width=2), connectgaps=False,
+        line=dict(color=NOMINAL_COLOR, width=2.5), connectgaps=False,
         hovertemplate="S(t): %{y:,.4f}<extra></extra>",
     )
 
@@ -606,11 +606,25 @@ def make_chart(w: pd.DataFrame, mode: str, ccy1: str, ccy2: str) -> go.Figure:
             dict(step="all", label="All"),
         ]),
     )
-    fig.update_layout(
-        height=580, hovermode="x unified", showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0),
-        margin=dict(l=60, r=60, t=40, b=40),
+      fig.update_layout(
+        template="plotly_white",
+        height=600,
+        hovermode="x unified",
+        showlegend=True,
+        font=dict(family="Inter, sans-serif", size=13, color="#334155"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0, bgcolor="rgba(0,0,0,0)"),
+        hoverlabel=dict(bgcolor="white", bordercolor="#E2E8F0", font=dict(family="Inter, sans-serif", size=12)),
+        margin=dict(l=60, r=60, t=50, b=30),
     )
+    fig.update_xaxes(
+        gridcolor="#EEF2F7", linecolor="#CBD5E1",
+        showspikes=True, spikecolor="#94A3B8", spikethickness=1, spikedash="dot",
+        rangeslider=dict(thickness=0.08, bgcolor="#F1F5F9"),
+        rangeselector=dict(bgcolor="#F1F5F9", activecolor="#DBEAFE", font=dict(size=12)),
+    )
+    fig.update_yaxes(gridcolor="#EEF2F7", zeroline=False)
     return fig
 
 
@@ -645,8 +659,8 @@ def series_coverage_table(df: pd.DataFrame, labels: dict[str, str]) -> pd.DataFr
 # =============================================================================
 def main() -> None:
     st.set_page_config(page_title="Real & Nominal Exchange Rates", page_icon="💱", layout="wide")
-    st.title("💱 Real & Nominal Exchange Rate Explorer")
-    st.caption("Monthly IMF data (SDMX 3.0): CPI and period-average exchange rates per USD, from 1976 where available.")
+    apply_styling()
+    hero()
 
     with st.spinner("Loading country list…"):
         countries, list_source = get_country_list()
